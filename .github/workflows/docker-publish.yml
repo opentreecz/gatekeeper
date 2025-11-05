@@ -1,0 +1,144 @@
+name: Docker Build and Publish
+
+#
+# ---== TRIGGER CONTROLS ==---
+#
+on:
+  # 1. Run on pushes to the 'main' branch
+  push:
+    branches: [ "main" ]
+
+  # 2. Run on Pull Requests targeting 'main' (but don't push images)
+  pull_request:
+    branches: [ "main" ]
+
+  # 3. Run weekly (Sunday 00:00) for security rebuilds
+  schedule:
+    - cron: '0 0 * * 0'
+
+  # 4. Allow manual runs from the "Actions" tab
+  workflow_dispatch:
+
+#
+# ---== JOB DEFINITIONS ==---
+#
+jobs:
+  build-and-push:
+    name: Build and Push Multi-Platform Image
+    runs-on: ubuntu-latest
+
+    # Grant permissions for this job
+    permissions:
+      contents: read     # To check out the code
+      packages: write    # To push to GitHub Container Registry (ghcr.io)
+      
+    steps:
+      # 1. Get the source code
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # 2. Set up QEMU for multi-platform emulation
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      # 3. Set up Docker Buildx (the multi-platform builder)
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 4. Generate a unique version tag
+      # This creates a tag like: 2025.11.05-a1b2c3d
+      - name: Generate unique version tag
+        id: version
+        run: echo "VERSION=$(date +'%Y.%m.%d')-$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
+        
+      # 5. Log in to GitHub Container Registry (ghcr.io)
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 6. Log in to Docker Hub
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 7. Build and push the image
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          # --- IMPORTANT ---
+          # This tells Docker to use the 'gatekeeper' folder as the build context
+          context: ./gatekeeper
+          
+          # This builds all 3 platforms you requested
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          
+          # Only push if it's NOT a pull request.
+          # Builds will still run on PRs to check for errors.
+          push: ${{ github.event_name != 'pull_request' }}
+          
+          # --- Image Tags ---
+          tags: |
+            ghcr.io/opentreecz/gatekeeper:latest
+            ghcr.io/opentreecz/gatekeeper:${{ steps.version.outputs.VERSION }}
+            opentreecz/gatekeeper:latest
+            opentreecz/gatekeeper:${{ steps.version.outputs.VERSION }}
+
+      # 8. Upload the version string so the release job can use it
+      - name: Upload version artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: version-tag
+          path: |
+            ${{ runner.temp }}/version.txt
+          retention-days: 1
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: echo $VERSION > ${{ runner.temp }}/version.txt
+
+  #
+  # ---== RELEASE JOB ==---
+  #
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build-and-push # This job only runs if 'build-and-push' succeeds
+    
+    # Only run this job for pushes to the 'main' branch
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    permissions:
+      contents: write # To create tags and releases
+
+    steps:
+      # 1. Download the version string from the previous job
+      - name: Download version artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: version-tag
+          path: ${{ runner.temp }}
+          
+      # 2. Read the version string into an output
+      - name: Read version tag
+        id: version
+        run: echo "VERSION=$(cat ${{ runner.temp }}/version.txt)" >> $GITHUB_OUTPUT
+
+      # 3. Create the GitHub Release
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: Release ${{ steps.version.outputs.VERSION }}
+          body: |
+            Automated multi-platform container release.
+            
+            Images pushed to:
+            - `ghcr.io/opentreecz/gatekeeper:${{ steps.version.outputs.VERSION }}`
+            - `opentreecz/gatekeeper:${{ steps.version.outputs.VERSION }}`
+          draft: false
+          prerelease: false
