@@ -80,18 +80,21 @@ jobs:
             ghcr.io/opentreecz/gatekeeper:latest
             ghcr.io/opentreecz/gatekeeper:${{ steps.version.outputs.VERSION }}
 
-      # 7. Upload the version string so the release job can use it
+      # 7. Create the version file for the release job
+      - name: Create version file
+        if: github.event_name != 'pull_request'
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: echo $VERSION > ${{ runner.temp }}/version.txt
+        
+      # 8. Upload the version string so the release job can use it
       - name: Upload version artifact
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: version-tag
-          path: |
-            ${{ runner.temp }}/version.txt
+          path: ${{ runner.temp }}/version.txt
           retention-days: 1
-        env:
-          VERSION: ${{ steps.version.outputs.VERSION }}
-        run: echo $VERSION > ${{ runner.temp }}/version.txt
 
   #
   # ---== RELEASE JOB ==---
