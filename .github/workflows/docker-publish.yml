@@ -1,4 +1,4 @@
-name: Docker Build and Publish
+name: Docker Build and Publish (GHCR Only)
 
 #
 # ---== TRIGGER CONTROLS ==---
@@ -49,7 +49,8 @@ jobs:
       # This creates a tag like: 2025.11.05-a1b2c3d
       - name: Generate unique version tag
         id: version
-        run: echo "VERSION=$(date +'%Y.%m.%d')-$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
+        # Using CET/CEST for the timestamp as you are in Czechia
+        run: echo "VERSION=$(TZ='Europe/Prague' date +'%Y.%m.%d')-$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
         
       # 5. Log in to GitHub Container Registry (ghcr.io)
       - name: Log in to ghcr.io
@@ -59,14 +60,7 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 6. Log in to Docker Hub
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      # 7. Build and push the image
+      # 6. Build and push the image
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
@@ -85,10 +79,8 @@ jobs:
           tags: |
             ghcr.io/opentreecz/gatekeeper:latest
             ghcr.io/opentreecz/gatekeeper:${{ steps.version.outputs.VERSION }}
-            opentreecz/gatekeeper:latest
-            opentreecz/gatekeeper:${{ steps.version.outputs.VERSION }}
 
-      # 8. Upload the version string so the release job can use it
+      # 7. Upload the version string so the release job can use it
       - name: Upload version artifact
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
@@ -137,8 +129,7 @@ jobs:
           body: |
             Automated multi-platform container release.
             
-            Images pushed to:
+            Image pushed to:
             - `ghcr.io/opentreecz/gatekeeper:${{ steps.version.outputs.VERSION }}`
-            - `opentreecz/gatekeeper:${{ steps.version.outputs.VERSION }}`
           draft: false
           prerelease: false
