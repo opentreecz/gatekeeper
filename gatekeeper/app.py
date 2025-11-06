@@ -55,7 +55,7 @@ async def get_or_create_session(request):
     if not session_id:
         print("No valid session. Attempting to find free container...")
         is_new_session = True
-        for base_url in APP_TARGETS:
+    for base_url in APP_TARGETS:
             lock_key = f"container-lock:{base_url}"
             lock_acquired = await r.set(lock_key, "in-use", ex=SESSION_TIMEOUT, nx=True)
             if lock_acquired:
@@ -143,7 +143,7 @@ async def proxy_websocket_request(request, target_base_url):
                 async for msg in server_ws:
                     if msg.type == web.WSMsgType.BINARY:
                         await client_ws.send_bytes(msg.data)
-                    elif msg.type == web.WSMsgType.TEXT:
+                    elif msg.type == web.WSMsgTye.TEXT:
                         await client_ws.send_str(msg.data)
                 await client_ws.close()
 
@@ -221,7 +221,7 @@ def create_self_signed_cert():
     cert.gmtime_adj_notAfter(10*365*24*60*60) # 10 years
     cert.set_issuer(cert.get_subject())
     cert.set_pubkey(k)
-    cert.sign(k, 'sha26')
+    cert.sign(k, 'sha256') # <-- **** FIX: Changed 'sha26' to 'sha256' ****
 
     # Save to files
     key_file = "gatekeeper_key.pem"
