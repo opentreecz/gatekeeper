@@ -1,16 +1,11 @@
-version: "3.8"
-
-networks:
-  app-net:
-    driver: bridge
-
 services:
   # 1. The Gatekeeper (Your Custom Session Manager)
   gatekeeper:
     build: ./gatekeeper
     env_file: ./.env
     ports:
-      - "80:5000" # Expose gatekeeper on port 80 to the world
+      - "80:5000"   # Public HTTP maps to container's port 5000
+      - "443:5001"  # Public HTTPS maps to container's port 5001
     networks:
       - app-net
     depends_on:
@@ -26,11 +21,12 @@ services:
       - app-net
 
   # 3. Your Application Pool (Scale by adding more here)
+  #    These must be running HTTPS on port 443 as defined in .env
   my-app-1:
     image: "nginx:latest" # <-- REPLACE with your app's image
     networks:
       - app-net
-    # Your app runs on port 80 inside the container
+    # Your app container must be configured to serve HTTPS on port 443
 
   my-app-2:
     image: "nginx:latest" # <-- REPLACE with your app's image
@@ -41,3 +37,8 @@ services:
     image: "nginx:latest" # <-- REPLACE with your app's image
     networks:
       - app-net
+
+networks:
+  app-net:
+    driver: bridge
+

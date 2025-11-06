@@ -1,4 +1,5 @@
-flask
 redis
-requests
 python-dotenv
+pyOpenSSL
+aiohttp
+urllib3
