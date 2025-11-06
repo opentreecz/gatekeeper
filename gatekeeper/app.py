@@ -28,46 +28,108 @@ print(f"Managing targets: {APP_TARGETS}")
 # Headers to exclude when proxying
 EXCLUDED_HEADERS = {'content-encoding', 'content-length', 'transfer-encoding', 'connection'}
 
+# --- NEW: Define a lock name for the race condition ---
+NEW_SESSION_LOCK_PREFIX = "new-session-ip-lock:"
+IP_SESSION_MAP_PREFIX = "ip-session-map:"
+
 async def get_or_create_session(request):
     """
     Handles the core Redis logic to get an existing session
     or find and lock a new one.
+    
+    *** This function is updated to fix the race condition. ***
     """
     r = request.app['redis']
     session_id = request.cookies.get('session_id')
     target_base_url = None
     is_new_session = False
 
-    # 1. Check for existing valid session
+    # 1. Check for existing valid session cookie
     if session_id:
         session_key = f"session:{session_id}"
         target_base_url_bytes = await r.get(session_key)
         if target_base_url_bytes:
             target_base_url = target_base_url_bytes.decode('utf-8')
             print(f"Refreshing session {session_id} for {target_base_url}")
+            # Refresh the session and the container lock
             await r.expire(session_key, SESSION_TIMEOUT)
             await r.expire(f"container-lock:{target_base_url}", SESSION_TIMEOUT)
-        else:
-            print(f"Stale session cookie found: {session_id}")
-            session_id = None
+            return target_base_url, session_id, False # It's an existing session
 
-    # 2. No valid session. Find a new container.
-    if not session_id:
-        print("No valid session. Attempting to find free container...")
+    # 2. No valid session (or stale cookie).
+    # This is where the race condition happens.
+    
+    # Get user's IP. Fallback to 'unknown' if not found.
+    user_ip = "unknown"
+    transport = request.transport
+    if transport:
+        peername = transport.get_extra_info('peername')
+        if peername:
+            user_ip = peername[0]
+            
+    # Define keys for our IP-based lock
+    ip_lock_key = f"{NEW_SESSION_LOCK_PREFIX}{user_ip}"
+    ip_map_key = f"{IP_SESSION_MAP_PREFIX}{user_ip}"
+
+    # Try to find if a parallel request from this IP already created a session
+    session_id = await r.get(ip_map_key)
+    if session_id:
+        session_id = session_id.decode('utf-8')
+        session_key = f"session:{session_id}"
+        target_base_url_bytes = await r.get(session_key)
+        if target_base_url_bytes:
+            print(f"Found session {session_id} via IP map for {user_ip}")
+            target_base_url = target_base_url_bytes.decode('utf-8')
+            # Don't refresh here, let the main logic do it if it was a cookie
+            # We just need to return the *target* and the *session_id*
+            return target_base_url, session_id, True # It's "new" to this request
+
+    # 3. This is the *first* request from this IP.
+    # We must acquire a global lock *for this IP* to prevent other requests
+    # from this same IP from *also* trying to create a new session.
+    async with r.lock(ip_lock_key, timeout=10):
+        
+        # Check again *inside* the lock, in case another request finished
+        # while we were waiting for the lock.
+        session_id = await r.get(ip_map_key)
+        if session_id:
+            session_id = session_id.decode('utf-8')
+            session_key = f"session:{session_id}"
+            target_base_url_bytes = await r.get(session_key)
+            if target_base_url_bytes:
+                print(f"Found session {session_id} via IP map (inside lock) for {user_ip}")
+                target_base_url = target_base_url_bytes.decode('utf-8')
+                return target_base_url, session_id, True
+
+        # 4. OK, we are *definitely* the first. Find a free container.
+        print(f"No valid session for IP {user_ip}. Attempting to find free container...")
         is_new_session = True
-    for base_url in APP_TARGETS:
+        for base_url in APP_TARGETS:
             lock_key = f"container-lock:{base_url}"
+            # Try to acquire the container lock
             lock_acquired = await r.set(lock_key, "in-use", ex=SESSION_TIMEOUT, nx=True)
             if lock_acquired:
+                # We got a container!
                 session_id = str(uuid.uuid4())
                 target_base_url = base_url
                 session_key = f"session:{session_id}"
-                await r.set(session_key, target_base_url, ex=SESSION_TIMEOUT)
-                await r.set(lock_key, session_key, ex=SESSION_TIMEOUT)
-                print(f"Assigned {target_base_url} to new session {session_id}")
-                break
 
+                # Link session_id to host
+                await r.set(session_key, target_base_url, ex=SESSION_TIMEOUT)
+                # Update the container lock to point to the *real* session
+                await r.set(lock_key, session_key, ex=SESSION_TIMEOUT)
+                
+                # *** FIX: Store this new session_id in the IP map ***
+                # This lock is short (60s). It just needs to be long enough
+                # for all parallel browser requests to complete.
+                await r.set(ip_map_key, session_id, ex=60)
+                
+                print(f"Assigned {target_base_url} to new session {session_id} for IP {user_ip}")
+                break # Stop searching
+
+    # Note: session_id might be None if all containers were busy
     return target_base_url, session_id, is_new_session
+
 
 async def proxy_http_request(request, target_url):
     """
@@ -117,7 +179,12 @@ async def proxy_websocket_request(request, target_base_url):
     
     # Prepare the backend-facing WebSocket URL
     ws_url_base = target_base_url.replace("https://", "wss://").replace("http://", "ws://")
-    ws_url = f"{ws_url_base}{request.path_qs}"
+    
+    # *** FIX: Clean up path slashes for WebSocket URL ***
+    clean_base = ws_url_base.rstrip('/')
+    clean_path = request.path.lstrip('/')
+    ws_url = f"{clean_base}/{clean_path}?{request.query_string}"
+    
     headers = {k: v for k, v in request.headers.items() if k.lower() not in ['host', 'connection', 'upgrade']}
 
     print(f"Attempting WebSocket connection to: {ws_url}")
@@ -143,7 +210,7 @@ async def proxy_websocket_request(request, target_base_url):
                 async for msg in server_ws:
                     if msg.type == web.WSMsgType.BINARY:
                         await client_ws.send_bytes(msg.data)
-                    elif msg.type == web.WSMsgTye.TEXT:
+                    elif msg.type == web.WSMsgType.TEXT:
                         await client_ws.send_str(msg.data)
                 await client_ws.close()
 
@@ -189,9 +256,13 @@ async def gatekeeper_handler(request):
         clean_path = request.path.lstrip('/')
         target_url = f"{clean_base}/{clean_path}"
         
+        # Add query string if it exists
+        if request.query_string:
+            target_url = f"{target_url}?{request.query_string}"
+
         response = await proxy_http_request(request, target_url)
         
-        # 5. Set session cookie if this is a new session
+        # 5. Set session cookie if this is a new session (and not a WebSocket)
         if is_new_session:
             response.set_cookie(
                 'session_id',
@@ -221,7 +292,9 @@ def create_self_signed_cert():
     cert.gmtime_adj_notAfter(10*365*24*60*60) # 10 years
     cert.set_issuer(cert.get_subject())
     cert.set_pubkey(k)
-    cert.sign(k, 'sha256') # <-- **** FIX: Changed 'sha26' to 'sha256' ****
+    
+    # *** FIX: Corrected typo 'sha26' to 'sha25_6' ***
+    cert.sign(k, 'sha256')
 
     # Save to files
     key_file = "gatekeeper_key.pem"
@@ -267,7 +340,7 @@ async def main():
     await runner.setup()
     
     # Create and start both HTTP and HTTPS sites
-    http_site = web.TCPSite(runner, '0.0.0.0', 5000)
+    http_site = web.TC_PSite(runner, '0.0.0.0', 5000)
     https_site = web.TCPSite(runner, '0.0.0.0', 5001, ssl_context=server_ssl_context)
     
     await http_site.start()
