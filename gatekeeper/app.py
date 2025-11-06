@@ -3,7 +3,6 @@ import uuid
 import redis.asyncio as aioredis
 from aiohttp import web, ClientSession, DummyCookieJar, TCPConnector
 from dotenv import load_dotenv
-import urllib3
 import ssl
 import asyncio
 from OpenSSL import crypto
@@ -21,7 +20,6 @@ APP_VERIFY_SSL = APP_VERIFY_SSL_RAW.lower() in ('true', '1', 't', 'yes')
 
 if not APP_VERIFY_SSL:
     print("WARNING: Upstream SSL certificate verification is disabled.")
-    # We don't need urllib3 here, aiohttp handles this differently
 
 print(f"Gatekeeper starting...")
 print(f"Session Timeout: {SESSION_TIMEOUT} seconds")
@@ -223,7 +221,7 @@ def create_self_signed_cert():
     cert.gmtime_adj_notAfter(10*365*24*60*60) # 10 years
     cert.set_issuer(cert.get_subject())
     cert.set_pubkey(k)
-    cert.sign(k, 'sha256')
+    cert.sign(k, 'sha26')
 
     # Save to files
     key_file = "gatekeeper_key.pem"
