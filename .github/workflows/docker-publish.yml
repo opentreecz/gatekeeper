@@ -1,4 +1,4 @@
-name: Docker Build and Publish (GHCR Only)
+name: Docker Build, Push, and Commit
 
 #
 # ---== TRIGGER CONTROLS ==---
@@ -24,35 +24,26 @@ on:
 #
 jobs:
   build-and-push:
-    name: Build and Push Multi-Platform Image
+    name: 1. Build and Push Image
     runs-on: ubuntu-latest
-
-    # Grant permissions for this job
     permissions:
-      contents: read     # To check out the code
-      packages: write    # To push to GitHub Container Registry (ghcr.io)
+      contents: read
+      packages: write
       
     steps:
-      # 1. Get the source code
       - name: Check out repository
         uses: actions/checkout@v4
 
-      # 2. Set up QEMU for multi-platform emulation
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
-      # 3. Set up Docker Buildx (the multi-platform builder)
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 4. Generate a unique version tag
-      # This creates a tag like: 2025.11.05-a1b2c3d
       - name: Generate unique version tag
         id: version
-        # Using CET/CEST for the timestamp as you are in Czechia
         run: echo "VERSION=$(TZ='Europe/Prague' date +'%Y.%m.%d')-$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
         
-      # 5. Log in to GitHub Container Registry (ghcr.io)
       - name: Log in to ghcr.io
         uses: docker/login-action@v3
         with:
@@ -60,34 +51,22 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 6. Build and push the image
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
-          # --- IMPORTANT ---
-          # This tells Docker to use the 'gatekeeper' folder as the build context
           context: ./gatekeeper
-          
-          # This builds all 3 platforms you requested
           platforms: linux/amd64,linux/arm64,linux/arm/v7
-          
-          # Only push if it's NOT a pull request.
-          # Builds will still run on PRs to check for errors.
           push: ${{ github.event_name != 'pull_request' }}
-          
-          # --- Image Tags ---
           tags: |
             ghcr.io/opentreecz/gatekeeper:latest
             ghcr.io/opentreecz/gatekeeper:${{ steps.version.outputs.VERSION }}
 
-      # 7. Create the version file for the release job
       - name: Create version file
         if: github.event_name != 'pull_request'
         env:
           VERSION: ${{ steps.version.outputs.VERSION }}
         run: echo $VERSION > ${{ runner.temp }}/version.txt
         
-      # 8. Upload the version string so the release job can use it
       - name: Upload version artifact
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
@@ -97,33 +76,87 @@ jobs:
           retention-days: 1
 
   #
-  # ---== RELEASE JOB ==---
+  # ---== NEW JOB: UPDATE COMPOSE FILE ==---
   #
-  create-release:
-    name: Create GitHub Release
+  update-docker-compose:
+    name: 2. Update docker-compose.yml
     runs-on: ubuntu-latest
-    needs: build-and-push # This job only runs if 'build-and-push' succeeds
+    needs: build-and-push # Must run after the build
     
-    # Only run this job for pushes to the 'main' branch
+    # Only run for pushes to 'main'
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
     permissions:
-      contents: write # To create tags and releases
-
+      contents: write # IMPORTANT: Needs permission to push to the repo
+      
     steps:
-      # 1. Download the version string from the previous job
+      # 1. Check out the code
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }} # Use default token for push
+
+      # 2. Download the version tag
       - name: Download version artifact
         uses: actions/download-artifact@v4
         with:
           name: version-tag
           path: ${{ runner.temp }}
           
-      # 2. Read the version string into an output
+      # 3. Read the version tag into an environment variable
       - name: Read version tag
         id: version
         run: echo "VERSION=$(cat ${{ runner.temp }}/version.txt)" >> $GITHUB_OUTPUT
 
-      # 3. Create the GitHub Release
+      # 4. Use 'sed' to replace the image tag in docker-compose.yml
+      - name: Update image tag in docker-compose.yml
+        env:
+          VERSION_TAG: ${{ steps.version.outputs.VERSION }}
+        run: |
+          sed -i "s|image: ghcr.io/opentreecz/gatekeeper:.*|image: ghcr.io/opentreecz/gatekeeper:${VERSION_TAG}|g" docker-compose.yml
+
+      # 5. Configure Git for the bot
+      - name: Configure Git
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "github-actions-bot@users.noreply.github.com"
+
+      # 6. Commit and push the change
+      - name: Commit and push changes
+        run: |
+          git add docker-compose.yml
+          # Check if there are changes to commit
+          if ! git diff-index --quiet HEAD; then
+            git commit -m "ci: Update gatekeeper image to ${{ steps.version.outputs.VERSION }} [ci skip]"
+            git push
+          else
+            echo "No changes to commit."
+          fi
+
+  #
+  # ---== RELEASE JOB ==---
+  #
+  create-release:
+    name: 3. Create GitHub Release
+    runs-on: ubuntu-latest
+    # This job now waits for BOTH build and the compose file update
+    needs: [build-and-push, update-docker-compose] 
+    
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write 
+
+    steps:
+      - name: Download version artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: version-tag
+          path: ${{ runner.temp }}
+          
+      - name: Read version tag
+        id: version
+        run: echo "VERSION=$(cat ${{ runner.temp }}/version.txt)" >> $GITHUB_OUTPUT
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -131,6 +164,7 @@ jobs:
           name: Release ${{ steps.version.outputs.VERSION }}
           body: |
             Automated multi-platform container release.
+            The `docker-compose.yml` file has been automatically updated.
             
             Image pushed to:
             - `ghcr.io/opentreecz/gatekeeper:${{ steps.version.outputs.VERSION }}`

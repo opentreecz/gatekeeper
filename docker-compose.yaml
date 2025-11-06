@@ -1,7 +1,8 @@
 services:
   # 1. The Gatekeeper (Your Custom Session Manager)
   gatekeeper:
-    build: ./gatekeeper
+    #build: ./gatekeeper
+    image: ghcr.io/opentreecz/gatekeeper:latest
     env_file: ./.env
     ports:
       - "80:5000"   # Public HTTP maps to container's port 5000
@@ -41,4 +42,3 @@ services:
 networks:
   app-net:
     driver: bridge
-
