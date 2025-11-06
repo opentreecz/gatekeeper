@@ -208,6 +208,7 @@ async def proxy_websocket_request(request, target_base_url):
 
             async def forward_server_to_client():
                 async for msg in server_ws:
+                    # *** FIX: Corrected typo 'WSMsgCype' to 'WSMsgType' ***
                     if msg.type == web.WSMsgType.BINARY:
                         await client_ws.send_bytes(msg.data)
                     elif msg.type == web.WSMsgType.TEXT:
@@ -293,7 +294,7 @@ def create_self_signed_cert():
     cert.set_issuer(cert.get_subject())
     cert.set_pubkey(k)
     
-    # *** FIX: Corrected typo 'sha26' to 'sha25_6' ***
+    # *** FIX: Corrected typo 'sha26' to 'sha256' ***
     cert.sign(k, 'sha256')
 
     # Save to files
@@ -340,7 +341,8 @@ async def main():
     await runner.setup()
     
     # Create and start both HTTP and HTTPS sites
-    http_site = web.TC_PSite(runner, '0.0.0.0', 5000)
+    # *** FIX: Corrected typo 'TC_PSite' to 'TCPSite' ***
+    http_site = web.TCPSite(runner, '0.0.0.0', 5000)
     https_site = web.TCPSite(runner, '0.0.0.0', 5001, ssl_context=server_ssl_context)
     
     await http_site.start()
